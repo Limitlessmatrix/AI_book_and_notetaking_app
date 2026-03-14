@@ -117,6 +117,70 @@
         </div>
       </section>
 
+      <!-- Offline Model Quality -->
+      <section class="setting-group">
+        <h3 class="setting-group-title">Offline Voice Quality <span class="badge">Offline Only</span></h3>
+        <p class="setting-hint">
+          Higher quality = more accurate, but uses more memory and takes
+          longer to convert speech. <strong>Fast &amp; Light</strong> is best
+          for this computer.
+        </p>
+        <div class="model-option-list">
+
+          <label class="model-option">
+            <input type="radio" name="model-pick" value="Xenova/whisper-tiny.en"
+                   id="model-tiny" checked />
+            <div class="model-option-body">
+              <div class="model-name">⚡ Fast &amp; Light <span class="model-badge recommended">Recommended</span></div>
+              <div class="model-meta">
+                <span class="model-ram ram-low">~130 MB RAM</span>
+                <span class="model-sep">·</span>
+                <span>Downloads ~40 MB once</span>
+                <span class="model-sep">·</span>
+                <span>Converts speech quickly</span>
+              </div>
+            </div>
+          </label>
+
+          <label class="model-option">
+            <input type="radio" name="model-pick" value="Xenova/whisper-base.en"
+                   id="model-base" />
+            <div class="model-option-body">
+              <div class="model-name">🎯 Better Quality</div>
+              <div class="model-meta">
+                <span class="model-ram ram-mid">~300 MB RAM</span>
+                <span class="model-sep">·</span>
+                <span>Downloads ~75 MB once</span>
+                <span class="model-sep">·</span>
+                <span>More accurate</span>
+              </div>
+            </div>
+          </label>
+
+          <label class="model-option">
+            <input type="radio" name="model-pick" value="Xenova/whisper-small.en"
+                   id="model-small" />
+            <div class="model-option-body">
+              <div class="model-name">🏆 Best Quality</div>
+              <div class="model-meta">
+                <span class="model-ram ram-high">~800 MB RAM</span>
+                <span class="model-sep">·</span>
+                <span>Downloads ~240 MB once</span>
+                <span class="model-sep">·</span>
+                <span>Highest accuracy — needs a powerful computer</span>
+              </div>
+            </div>
+          </label>
+
+        </div>
+        <!-- Hidden select kept in sync by JS for easy reading -->
+        <select id="model-select" style="display:none">
+          <option value="Xenova/whisper-tiny.en">tiny</option>
+          <option value="Xenova/whisper-base.en">base</option>
+          <option value="Xenova/whisper-small.en">small</option>
+        </select>
+      </section>
+
       <!-- Append mode -->
       <section class="setting-group">
         <h3 class="setting-group-title">How to Add New Text</h3>

@@ -4,8 +4,16 @@
  * Runs @xenova/transformers Whisper entirely in a background thread so the
  * UI never freezes during model loading or transcription.
  *
+ * WHY dynamic importScripts?
+ *   When the app is packaged with electron-builder (asar), relative paths
+ *   in importScripts() resolve inside the asar archive where WASM files
+ *   cannot be directly fetched by onnxruntime-web.  The renderer computes
+ *   the correct absolute file:// URL for both dev and packaged modes and
+ *   passes it here on the first 'load-model' message.
+ *
  * Messages IN  (from renderer):
- *   { type: 'load-model', data: { modelName, cacheDir } }
+ *   { type: 'load-model', data: { modelName, cacheDir,
+ *                                 transformersPath, wasmPath } }
  *   { type: 'transcribe',  data: { audio: Float32Array } }
  *
  * Messages OUT (to renderer):
@@ -18,23 +26,47 @@
 
 'use strict';
 
-// ─── Load @xenova/transformers UMD build via importScripts ────────────────────
-// The path is relative to this worker file (src/whisper-worker.js),
-// so ../node_modules/... resolves to the project root node_modules.
-try {
-  importScripts('../node_modules/@xenova/transformers/dist/transformers.min.js');
-} catch (e) {
-  self.postMessage({ type: 'error', error: 'Could not load voice recognition library. Please reinstall the app. (' + e.message + ')' });
-  throw e;
+let isInitialized = false;
+let pipeline_fn   = null;
+let env_obj       = null;
+let transcriber   = null;
+let isLoading     = false;
+
+// ─── Initialise transformers.js ───────────────────────────────────────────────
+// Called once, with the exact path supplied by the renderer.
+
+function initTransformers(transformersPath, wasmPath) {
+  if (isInitialized) return;
+
+  try {
+    importScripts(transformersPath);
+  } catch (e) {
+    self.postMessage({
+      type: 'error',
+      error: 'Could not load voice recognition library. ' +
+             'Please reinstall the app. (' + e.message + ')',
+    });
+    throw e;
+  }
+
+  // After importScripts the UMD bundle exposes window.Transformers / self.Transformers
+  pipeline_fn = self.Transformers.pipeline;
+  env_obj     = self.Transformers.env;
+
+  // ── WASM path (critical for packaged Electron apps) ──
+  // Tell onnxruntime-web exactly where to find the .wasm files so it does
+  // not try to derive the location from the script URL (which would point
+  // inside the asar and fail).
+  if (wasmPath) {
+    env_obj.backends.onnx.wasm.wasmPaths = wasmPath;
+  }
+
+  // Single-threaded WASM — avoids SharedArrayBuffer requirement and keeps
+  // memory usage low on 8 GB machines.
+  env_obj.backends.onnx.wasm.numThreads = 1;
+
+  isInitialized = true;
 }
-
-// After importScripts, @xenova/transformers exposes `Transformers` globally.
-const { pipeline, env } = self.Transformers;
-
-// ─── State ───────────────────────────────────────────────────────────────────
-
-let transcriber = null;
-let isLoading   = false;
 
 // ─── Model loading ────────────────────────────────────────────────────────────
 
@@ -48,24 +80,18 @@ async function loadModel(modelName, cacheDir) {
   isLoading = true;
 
   try {
-    // Configure cache directory (persists model after first download)
-    env.cacheDir        = cacheDir;
-    env.allowRemoteModels = true;
-    env.allowLocalModels  = true;
+    env_obj.cacheDir          = cacheDir;
+    env_obj.allowRemoteModels = true;
+    env_obj.allowLocalModels  = true;
 
-    // Disable multi-threading to avoid SharedArrayBuffer requirements in Electron
-    env.backends.onnx.wasm.numThreads = 1;
-
-    transcriber = await pipeline(
+    transcriber = await pipeline_fn(
       'automatic-speech-recognition',
       modelName,
       {
-        // Relay download progress back to the renderer
         progress_callback: (progress) => {
           self.postMessage({ type: 'loading-progress', progress });
         },
-        // Use the quantised model for smaller download & faster inference
-        quantized: true,
+        quantized: true, // smaller download & lower RAM
       }
     );
 
@@ -73,10 +99,7 @@ async function loadModel(modelName, cacheDir) {
     self.postMessage({ type: 'model-ready' });
   } catch (err) {
     isLoading = false;
-    self.postMessage({
-      type: 'error',
-      error: buildFriendlyError(err),
-    });
+    self.postMessage({ type: 'error', error: buildFriendlyError(err) });
   }
 }
 
@@ -84,7 +107,10 @@ async function loadModel(modelName, cacheDir) {
 
 async function transcribeAudio(float32Audio) {
   if (!transcriber) {
-    self.postMessage({ type: 'error', error: 'Voice recognition is not ready yet. Please wait a moment.' });
+    self.postMessage({
+      type: 'error',
+      error: 'Voice recognition is not ready yet. Please wait a moment.',
+    });
     return;
   }
 
@@ -92,38 +118,32 @@ async function transcribeAudio(float32Audio) {
 
   try {
     const result = await transcriber(float32Audio, {
-      // Handle recordings longer than ~30 s with sliding-window chunking
-      chunk_length_s: 30,
-      stride_length_s: 5,
-      language: 'english',
-      task: 'transcribe',
-      // Return timestamps (useful for future features) but just use text for now
+      chunk_length_s:    30,
+      stride_length_s:   5,
+      language:          'english',
+      task:              'transcribe',
       return_timestamps: false,
     });
 
     const text = Array.isArray(result)
       ? result.map((r) => r.text).join(' ')
-      : result.text || '';
+      : (result.text || '');
 
     self.postMessage({ type: 'result', text: text.trim() });
   } catch (err) {
-    self.postMessage({
-      type: 'error',
-      error: buildFriendlyError(err),
-    });
+    self.postMessage({ type: 'error', error: buildFriendlyError(err) });
   }
 }
 
 // ─── Error helper ─────────────────────────────────────────────────────────────
 
 function buildFriendlyError(err) {
-  const msg = (err && err.message) ? err.message : String(err);
-
+  const msg = err && err.message ? err.message : String(err);
   if (/network|fetch|internet|failed to fetch/i.test(msg)) {
     return 'Could not download the voice model. Please check your internet connection and restart the app.';
   }
   if (/out of memory|memory/i.test(msg)) {
-    return 'Not enough memory to run voice recognition. Try closing other programs.';
+    return 'Not enough memory. Try closing other programs, then restart Voice Notes.';
   }
   if (/wasm|onnx/i.test(msg)) {
     return 'Voice recognition engine failed to start. Please restart the app.';
@@ -138,6 +158,8 @@ self.onmessage = async (event) => {
 
   switch (type) {
     case 'load-model':
+      // Initialise the library on first call (dynamic path from renderer)
+      initTransformers(data.transformersPath, data.wasmPath);
       await loadModel(data.modelName, data.cacheDir);
       break;
 

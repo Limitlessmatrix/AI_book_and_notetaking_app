@@ -114,9 +114,10 @@ function getSettingsPath() {
 const DEFAULT_SETTINGS = {
   apiKey: '',
   useOnlineMode: false,
-  fontSize: 'medium', // small | medium | large | xlarge
+  fontSize: 'large',  // small | medium | large | xlarge
   appendMode: true,   // append new transcriptions vs replace
   autoSave: false,
+  model: 'Xenova/whisper-tiny.en', // lightweight default for 8 GB machines
 };
 
 function loadSettings() {
@@ -160,6 +161,12 @@ function decodeSettings(raw) {
 // ──────────────────────────────────────────────
 
 ipcMain.handle('get-user-data-path', () => app.getPath('userData'));
+
+// Expose packaging info so the renderer can compute correct WASM paths
+ipcMain.handle('get-app-info', () => ({
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
+}));
 
 ipcMain.handle('get-settings', () => decodeSettings(loadSettings()));
 
