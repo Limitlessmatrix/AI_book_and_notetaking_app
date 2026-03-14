@@ -1,0 +1,16 @@
+{
+  "name": "voice-notes",
+  "version": "1.0.0",
+  "description": "Easy offline voice-to-text notes app — works without internet",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@xenova/transformers": "^2.17.2",
+    "electron": "^28.3.3"
+  },
+  "keywords": ["voice", "speech-to-text", "notes", "offline"],
+  "author": "Voice Notes",
+  "license": "MIT"
+}
