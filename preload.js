@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   // Paths & settings
   getUserDataPath: () => ipcRenderer.invoke('get-user-data-path'),
+  getAppInfo:     () => ipcRenderer.invoke('get-app-info'),
   getSettings:    () => ipcRenderer.invoke('get-settings'),
   saveSettings:   (s) => ipcRenderer.invoke('save-settings', s),
 

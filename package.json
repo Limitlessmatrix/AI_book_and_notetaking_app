@@ -4,13 +4,85 @@
   "description": "Easy offline voice-to-text notes app — works without internet",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build:win": "electron-builder --win --x64",
+    "build:win:portable": "electron-builder --win portable --x64",
+    "generate-icon": "node scripts/generate-icon.js"
   },
   "dependencies": {
     "@xenova/transformers": "^2.17.2",
     "electron": "^28.3.3"
   },
-  "keywords": ["voice", "speech-to-text", "notes", "offline"],
+  "devDependencies": {
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.voicenotes.app",
+    "productName": "Voice Notes",
+    "copyright": "Voice Notes App",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/@xenova/transformers/dist/**"
+    ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**",
+      "node_modules/**",
+      "package.json",
+      "!node_modules/.cache/**",
+      "!**/*.map",
+      "!**/README*",
+      "!**/CHANGELOG*",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/spec/**",
+      "!**/example/**",
+      "!**/examples/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Voice Notes",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeader": null,
+      "license": null,
+      "runAfterFinish": true
+    },
+    "portable": {
+      "artifactName": "VoiceNotes-Portable.exe"
+    },
+    "publish": null
+  },
+  "keywords": [
+    "voice",
+    "speech-to-text",
+    "notes",
+    "offline"
+  ],
   "author": "Voice Notes",
   "license": "MIT"
 }
