@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice Notes</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="font-medium">
+
+  <!-- ═══════════════════════════════════════════════ HEADER ══ -->
+  <header class="app-header">
+    <div class="header-left">
+      <span class="app-logo">🎤</span>
+      <span class="app-title">Voice Notes</span>
+    </div>
+    <div class="header-right">
+      <button id="btn-open" class="header-btn" title="Open a saved file">
+        📂 Open File
+      </button>
+      <button id="btn-settings" class="header-btn" title="Settings">
+        ⚙️ Settings
+      </button>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════ STATUS BAR ══ -->
+  <div id="status-bar" class="status-bar status-loading">
+    <span id="status-icon" class="status-icon">⏳</span>
+    <span id="status-text">Starting up voice recognition… please wait a moment.</span>
+  </div>
+
+  <!-- ═══════════════════ FIRST-TIME SETUP OVERLAY ══ -->
+  <div id="setup-overlay" class="overlay hidden">
+    <div class="overlay-card">
+      <div class="overlay-emoji">🎉</div>
+      <h2>Welcome to Voice Notes!</h2>
+      <p class="overlay-subtitle">
+        We need to set up offline voice recognition for the first time.<br />
+        <strong>This only happens once</strong> — after that, the app works without internet.
+      </p>
+      <div class="progress-track">
+        <div id="setup-progress-bar" class="progress-fill" style="width: 0%"></div>
+      </div>
+      <p id="setup-progress-label" class="progress-label">
+        Downloading voice recognition… 0%
+      </p>
+      <p class="overlay-hint">
+        ☕ This usually takes 1–3 minutes depending on your internet speed.
+      </p>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ SETTINGS PANEL ══ -->
+  <div id="settings-panel" class="side-panel hidden">
+    <div class="side-panel-inner">
+      <div class="panel-header">
+        <h2>⚙️ Settings</h2>
+        <button id="btn-close-settings" class="close-btn" title="Close settings">✕</button>
+      </div>
+
+      <!-- Voice Mode -->
+      <section class="setting-group">
+        <h3 class="setting-group-title">Voice Recognition Mode</h3>
+
+        <label class="radio-card" id="card-offline">
+          <input type="radio" name="voice-mode" value="offline" id="mode-offline" checked />
+          <div class="radio-card-body">
+            <span class="radio-card-icon">🔒</span>
+            <div>
+              <strong>Offline Mode</strong>
+              <p>Works without internet. Private and completely free.</p>
+            </div>
+          </div>
+        </label>
+
+        <label class="radio-card" id="card-online">
+          <input type="radio" name="voice-mode" value="online" id="mode-online" />
+          <div class="radio-card-body">
+            <span class="radio-card-icon">🌐</span>
+            <div>
+              <strong>Better Quality Mode</strong>
+              <p>Uses OpenAI's servers for higher accuracy. Needs internet &amp; an API key below.</p>
+            </div>
+          </div>
+        </label>
+      </section>
+
+      <!-- API Key -->
+      <section class="setting-group" id="api-key-group">
+        <h3 class="setting-group-title">OpenAI API Key <span class="badge">Optional</span></h3>
+        <p class="setting-hint">
+          Only needed for "Better Quality Mode" above.<br />
+          Your key is stored only on this computer and never shared.
+        </p>
+        <div class="api-key-row">
+          <input
+            type="password"
+            id="api-key-input"
+            class="text-input"
+            placeholder="Paste your key here  (sk-…)"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="btn-toggle-key" class="toggle-key-btn" title="Show/hide key">👁</button>
+        </div>
+      </section>
+
+      <!-- Text Size -->
+      <section class="setting-group">
+        <h3 class="setting-group-title">Text Size in Notes</h3>
+        <div class="size-btn-row">
+          <button class="size-btn" data-size="small">Small</button>
+          <button class="size-btn" data-size="medium">Medium</button>
+          <button class="size-btn active" data-size="large">Large</button>
+          <button class="size-btn" data-size="xlarge">Very Large</button>
+        </div>
+      </section>
+
+      <!-- Append mode -->
+      <section class="setting-group">
+        <h3 class="setting-group-title">How to Add New Text</h3>
+        <label class="toggle-label">
+          <div class="toggle-switch">
+            <input type="checkbox" id="toggle-append" checked />
+            <span class="toggle-slider"></span>
+          </div>
+          <span class="toggle-desc">
+            <strong>Add to existing notes</strong>
+            <small>Turn OFF to replace notes each time you record</small>
+          </span>
+        </label>
+      </section>
+
+      <div class="panel-footer">
+        <button id="btn-save-settings" class="btn btn-primary">✅ Save Settings</button>
+        <button id="btn-cancel-settings" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ MAIN AREA ══ -->
+  <main id="main-content">
+
+    <!-- ── Record section ── -->
+    <section class="record-section">
+
+      <!-- Big record button -->
+      <button id="btn-record" class="record-btn" disabled>
+        <span id="record-btn-icon" class="rec-icon">🎤</span>
+        <span id="record-btn-label" class="rec-label">Click here to start speaking</span>
+      </button>
+
+      <!-- Timer shown while recording -->
+      <div id="record-timer" class="record-timer hidden">
+        <span class="timer-dot"></span>
+        <span id="timer-display">0:00</span>
+        <span class="timer-hint">Recording… click the button again to stop</span>
+      </div>
+
+      <!-- Sound wave bars (animated while recording) -->
+      <div id="sound-wave" class="sound-wave hidden">
+        <span class="wave-bar"></span>
+        <span class="wave-bar"></span>
+        <span class="wave-bar"></span>
+        <span class="wave-bar"></span>
+        <span class="wave-bar"></span>
+        <span class="wave-bar"></span>
+        <span class="wave-bar"></span>
+      </div>
+
+    </section>
+
+    <!-- ── Notes section ── -->
+    <section class="notes-section">
+      <div class="notes-toolbar">
+        <span class="notes-label">📝 Your Notes</span>
+        <div class="notes-actions">
+          <button id="btn-copy"  class="tool-btn" title="Copy all text to clipboard">📋 Copy All</button>
+          <button id="btn-clear" class="tool-btn" title="Clear all text">🗑️ Clear</button>
+          <button id="btn-save"  class="tool-btn tool-btn-save" title="Save notes to a file">💾 Save File</button>
+        </div>
+      </div>
+      <textarea
+        id="notes-area"
+        class="notes-area"
+        placeholder="Your words will appear here as you speak…
+
+Just click the big microphone button above and start talking!"
+        spellcheck="true"
+      ></textarea>
+      <div class="word-count-bar">
+        <span id="word-count">0 words</span>
+        <span id="char-count">0 characters</span>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ═══════════════════════════════════════════ HELP MODAL ══ -->
+  <div id="help-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h2>How to Use Voice Notes</h2>
+      <ol class="help-list">
+        <li>
+          <span class="help-num">1</span>
+          <div>
+            <strong>Click the big microphone button</strong> to start recording.<br />
+            Speak naturally — there's no rush.
+          </div>
+        </li>
+        <li>
+          <span class="help-num">2</span>
+          <div>
+            <strong>Click it again to stop.</strong><br />
+            The app will convert your speech to text in a few seconds.
+          </div>
+        </li>
+        <li>
+          <span class="help-num">3</span>
+          <div>
+            <strong>Read and edit</strong> the text in the notes area below.
+          </div>
+        </li>
+        <li>
+          <span class="help-num">4</span>
+          <div>
+            <strong>Click "Save File"</strong> to save your notes to your computer.
+          </div>
+        </li>
+      </ol>
+      <p class="help-tip">
+        💡 <strong>Tip:</strong> The app works offline after the first setup.
+        No internet needed!
+      </p>
+      <button id="btn-close-help" class="btn btn-primary">Got it! Let's go 👍</button>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ ERROR MODAL ══ -->
+  <div id="error-modal" class="modal-backdrop hidden">
+    <div class="modal-card modal-error">
+      <div class="error-icon">⚠️</div>
+      <h2 id="error-title">Something went wrong</h2>
+      <p id="error-message">An unexpected error occurred.</p>
+      <button id="btn-close-error" class="btn btn-primary">OK</button>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ CONFIRM MODAL ══ -->
+  <div id="confirm-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h2 id="confirm-title">Are you sure?</h2>
+      <p id="confirm-message"></p>
+      <div class="modal-btn-row">
+        <button id="btn-confirm-yes" class="btn btn-danger">Yes, clear it</button>
+        <button id="btn-confirm-no"  class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
