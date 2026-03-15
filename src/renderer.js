@@ -224,24 +224,38 @@ btnSaveSettings.addEventListener('click', async () => {
 
 function initModelListeners() {
   window.api.onModelProgress((progress) => {
-    let pct = 0;
-    if (typeof progress === 'number') {
-      pct = Math.round(progress * 100);
-    } else if (progress && typeof progress.progress === 'number') {
-      pct = Math.round(progress.progress * 100);
-    }
+    if (!progress) return;
 
-    if (progress && (progress.status === 'download' || progress.status === 'initiate')) {
+    // @xenova/transformers v2 progress object:
+    //   { status: 'initiate'|'progress'|'done'|'ready', progress: 0-100, file, ... }
+    // Note: progress.progress is already 0–100, NOT 0–1.
+    const status = progress.status || '';
+    const pct    = typeof progress.progress === 'number'
+      ? Math.min(100, Math.round(progress.progress))
+      : 0;
+
+    if (status === 'initiate') {
+      // A new file is about to start downloading
       setupOverlay.classList.remove('hidden');
-      setStatus('setup');
-      if (progress.status === 'download') {
-        setupProgressBar.style.width   = `${pct}%`;
-        setupProgressLbl.textContent   = `Downloading voice recognition… ${pct}%`;
-      } else {
-        setupProgressLbl.textContent = 'Preparing offline model…';
-      }
-    } else if (progress && progress.status === 'done') {
+      setStatus('setup', 'Downloading voice model for the first time…');
+      setupProgressLbl.textContent = 'Starting download…';
+
+    } else if (status === 'progress') {
+      // Active download — update bar and label
+      setupOverlay.classList.remove('hidden');
+      setStatus('setup', 'Downloading voice model for the first time…');
+      setupProgressBar.style.width = `${pct}%`;
+      setupProgressLbl.textContent = `Downloading voice recognition… ${pct}%`;
+
+    } else if (status === 'done') {
+      // One file finished; keep bar visible until model-ready fires
       setupProgressBar.style.width = '100%';
+      setupProgressLbl.textContent = 'Download complete! Starting up…';
+
+    } else if (status === 'ready') {
+      // pipeline() is fully ready (may fire before our IPC model-ready event)
+      setupProgressBar.style.width = '100%';
+      setupProgressLbl.textContent = 'Voice recognition ready!';
     }
   });
 
