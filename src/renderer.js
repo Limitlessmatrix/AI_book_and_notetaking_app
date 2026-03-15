@@ -81,10 +81,15 @@ let settings = {
 let appReady      = false;
 let isRecording   = false;
 let isProcessing  = false;
-let mediaRecorder = null;
-let audioChunks   = [];
-let timerInterval = null;
-let timerSeconds  = 0;
+let mediaRecorder  = null;
+let audioChunks    = [];
+let timerInterval  = null;
+let timerSeconds   = 0;
+
+// Mic level meter state
+let analyserNode   = null;
+let levelRafId     = null;
+const waveBars     = document.querySelectorAll('.wave-bar');
 
 // ─── Status helpers ───────────────────────────────────────────────────────────
 
@@ -301,6 +306,7 @@ function initModelListeners() {
 
   window.api.onModelReady(() => {
     clearModelTimeout();
+    clearTimeout(window.__cachedTimer);
     setupProgressBar.classList.remove('indeterminate');
     setupOverlay.classList.add('hidden');
     appReady = true;
@@ -310,6 +316,7 @@ function initModelListeners() {
 
   window.api.onModelError((msg) => {
     clearModelTimeout();
+    clearTimeout(window.__cachedTimer);
     setupProgressBar.classList.remove('indeterminate');
     setupOverlay.classList.add('hidden');
     setStatus('error', msg);
@@ -320,6 +327,29 @@ function initModelListeners() {
 async function startModelLoading() {
   const userDataPath = await window.api.getUserDataPath();
   const modelName    = settings.model || 'Xenova/whisper-tiny.en';
+
+  // Show the setup overlay on EVERY launch, not just first-time downloads.
+  // When the model is already cached the download phase is skipped, but
+  // the ONNX runtime still needs 10–30 s to compile it into WASM memory.
+  // Without this the user sees a frozen "Starting up…" status bar with no
+  // other feedback.
+  setupOverlay.classList.remove('hidden');
+  setupProgressBar.style.width = '0%';
+  setupProgressBar.classList.remove('indeterminate');
+  setupProgressLbl.textContent = 'Getting voice recognition ready…';
+
+  // If the model is cached, no download events fire. Switch to the
+  // indeterminate shimmer after 1.5 s so the user always sees movement.
+  const cachedTimer = setTimeout(() => {
+    if (!appReady) {
+      setupProgressBar.classList.add('indeterminate');
+      setupProgressLbl.textContent = 'Loading voice engine… (first load takes up to a minute)';
+    }
+  }, 1500);
+
+  // Clean up the timer when model-ready fires (handled inside initModelListeners)
+  window.__cachedTimer = cachedTimer;
+
   window.api.startModelLoading(modelName, userDataPath + '/models');
 }
 
@@ -330,6 +360,9 @@ async function startRecording() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     audioChunks  = [];
+
+    // Wire up a real-time level meter so the wave bars react to actual mic input
+    startLevelMeter(stream);
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus' : 'audio/webm';
@@ -357,6 +390,7 @@ async function startRecording() {
 
 function stopRecording() {
   if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  stopLevelMeter();
   mediaRecorder.stop();
   isRecording = false;
   stopTimer();
@@ -415,6 +449,61 @@ function updateTimerDisplay() {
   timerDisplay.textContent = `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// ─── Live microphone level meter ──────────────────────────────────────────────
+// Drives the wave-bar heights from real AnalyserNode data so the bars
+// actually respond to the user's voice instead of playing a fixed CSS loop.
+
+function startLevelMeter(stream) {
+  try {
+    const ctx      = new AudioContext();
+    analyserNode   = ctx.createAnalyser();
+    analyserNode.fftSize        = 256;
+    analyserNode.smoothingTimeConstant = 0.6;
+
+    const src = ctx.createMediaStreamSource(stream);
+    src.connect(analyserNode);
+    // NOTE: intentionally NOT connected to ctx.destination — no echo
+
+    const bufLen  = analyserNode.frequencyBinCount; // 128
+    const dataArr = new Uint8Array(bufLen);
+
+    function tick() {
+      levelRafId = requestAnimationFrame(tick);
+      analyserNode.getByteFrequencyData(dataArr);
+
+      // Average the lower-frequency bins (voice range ~100–3000 Hz)
+      const voiceBins = Math.floor(bufLen * 0.3);
+      let sum = 0;
+      for (let i = 0; i < voiceBins; i++) sum += dataArr[i];
+      const avgVolume = sum / voiceBins; // 0–255
+
+      // Map each bar to a slightly different frequency band for a natural look
+      waveBars.forEach((bar, i) => {
+        const binIndex = Math.floor((i / waveBars.length) * voiceBins);
+        // Blend individual bin with overall average so bars move together
+        const raw      = (dataArr[binIndex] * 0.7 + avgVolume * 0.3);
+        const pct      = Math.max(8, Math.min(100, (raw / 255) * 100));
+        bar.style.setProperty('--bar-height', `${pct}%`);
+      });
+    }
+
+    tick();
+  } catch (e) {
+    // AnalyserNode failed (e.g. permission race) — fall back to CSS animation silently
+    console.warn('Level meter unavailable:', e);
+  }
+}
+
+function stopLevelMeter() {
+  if (levelRafId) { cancelAnimationFrame(levelRafId); levelRafId = null; }
+  if (analyserNode) {
+    try { analyserNode.context.close(); } catch (_) {}
+    analyserNode = null;
+  }
+  // Reset bars to idle height so they don't freeze mid-animation
+  waveBars.forEach((bar) => bar.style.removeProperty('--bar-height'));
+}
+
 // ─── Audio processing ─────────────────────────────────────────────────────────
 
 async function processAudio() {
@@ -432,6 +521,11 @@ async function processAudio() {
 }
 
 async function transcribeOffline() {
+  // Yield to the browser paint queue FIRST so the "Converting speech…"
+  // status bar and button state are visibly rendered before the heavy
+  // AudioContext / resampling work blocks the main thread.
+  await new Promise((r) => setTimeout(r, 60));
+
   try {
     const blob        = new Blob(audioChunks, { type: audioChunks[0].type || 'audio/webm' });
     const arrayBuffer = await blob.arrayBuffer();
