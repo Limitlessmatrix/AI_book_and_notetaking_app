@@ -5,8 +5,10 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build:win": "electron-builder --win --x64",
+    "build:win": "electron-builder --win nsis --x64",
+    "build:win:msi": "electron-builder --win msi --x64",
     "build:win:portable": "electron-builder --win portable --x64",
+    "build:win:all": "electron-builder --win --x64",
     "generate-icon": "node scripts/generate-icon.js"
   },
   "dependencies": {
@@ -22,7 +24,8 @@
     "copyright": "Voice Notes App",
     "asar": true,
     "asarUnpack": [
-      "node_modules/@xenova/transformers/dist/**"
+      "node_modules/@xenova/transformers/**",
+      "src/node-whisper-worker.mjs"
     ],
     "files": [
       "main.js",
@@ -44,15 +47,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
+        },
+        {
+          "target": "msi",
+          "arch": ["x64"]
         },
         {
           "target": "portable",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
         }
       ],
       "icon": "assets/icon.ico",
@@ -70,6 +73,14 @@
       "uninstallerIcon": "assets/icon.ico",
       "installerHeader": null,
       "license": null,
+      "runAfterFinish": true
+    },
+    "msi": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Voice Notes",
       "runAfterFinish": true
     },
     "portable": {

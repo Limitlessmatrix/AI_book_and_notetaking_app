@@ -1,15 +1,16 @@
 /**
  * renderer.js — Voice Notes
  *
- * Responsibilities:
- *  • UI state management (recording, processing, idle, error)
- *  • Microphone capture via MediaRecorder + Web Audio API resampling
- *  • Routes audio to:
- *      – Offline: Web Worker running @xenova/transformers Whisper
- *      – Online:  OpenAI /v1/audio/transcriptions API (fallback)
- *  • Settings load/save
- *  • File open / save
- *  • Word/char count
+ * All speech-to-text work is now done in the Electron MAIN process via
+ * worker_threads (src/node-whisper-worker.js). The renderer communicates
+ * through the contextBridge IPC surface defined in preload.js.
+ *
+ * Flow:
+ *   1. init()  → window.api.startModelLoading(model, cacheDir)
+ *   2. Main    → 'model-ready' event when loaded
+ *   3. Record  → MediaRecorder → resample to 16 kHz Float32
+ *   4. Stop    → window.api.transcribe(audioBuffer)  [blocks until done]
+ *   5. Result  → append text to notes area
  */
 
 'use strict';
@@ -35,8 +36,8 @@ const apiKeyInput      = document.getElementById('api-key-input');
 const btnToggleKey     = document.getElementById('btn-toggle-key');
 const sizeBtns         = document.querySelectorAll('.size-btn');
 const toggleAppend     = document.getElementById('toggle-append');
-const modelSelect      = document.getElementById('model-select');
 const modelRadios      = document.querySelectorAll('input[name="model-pick"]');
+const modelSelect      = document.getElementById('model-select');
 
 const btnOpen          = document.getElementById('btn-open');
 const btnRecord        = document.getElementById('btn-record');
@@ -84,7 +85,6 @@ let mediaRecorder = null;
 let audioChunks   = [];
 let timerInterval = null;
 let timerSeconds  = 0;
-let whisperWorker = null;
 
 // ─── Status helpers ───────────────────────────────────────────────────────────
 
@@ -100,16 +100,16 @@ const STATUS = {
 
 function setStatus(key, customText) {
   const s = STATUS[key] || STATUS.ready;
-  statusBar.className = `status-bar ${s.cls}`;
-  statusIcon.textContent = s.icon;
-  statusText.textContent = customText || s.text;
+  statusBar.className     = `status-bar ${s.cls}`;
+  statusIcon.textContent  = s.icon;
+  statusText.textContent  = customText || s.text;
 }
 
 // ─── Error / confirm helpers ──────────────────────────────────────────────────
 
 function showError(title, message) {
-  errorTitle.textContent = title || 'Something went wrong';
-  errorMsg.textContent   = message || 'An unexpected error occurred.';
+  errorTitle.textContent = title  || 'Something went wrong';
+  errorMsg.textContent   = message|| 'An unexpected error occurred.';
   errorModal.classList.remove('hidden');
 }
 
@@ -118,10 +118,10 @@ function showConfirm(title, message) {
     confirmTitle.textContent = title;
     confirmMsg.textContent   = message;
     confirmModal.classList.remove('hidden');
-
-    const yes = () => { confirmModal.classList.add('hidden'); cleanup(); resolve(true);  };
-    const no  = () => { confirmModal.classList.add('hidden'); cleanup(); resolve(false); };
-    function cleanup() {
+    const yes = () => { close(); resolve(true);  };
+    const no  = () => { close(); resolve(false); };
+    function close() {
+      confirmModal.classList.add('hidden');
       btnConfirmYes.removeEventListener('click', yes);
       btnConfirmNo .removeEventListener('click', no);
     }
@@ -138,52 +138,35 @@ btnConfirmNo .addEventListener('click', () => confirmModal.classList.add('hidden
 function updateWordCount() {
   const text  = notesArea.value.trim();
   const words = text ? text.split(/\s+/).length : 0;
-  const chars = notesArea.value.length;
   wordCountEl.textContent = `${words} word${words !== 1 ? 's' : ''}`;
-  charCountEl.textContent = `${chars} character${chars !== 1 ? 's' : ''}`;
+  charCountEl.textContent = `${notesArea.value.length} character${notesArea.value.length !== 1 ? 's' : ''}`;
 }
 notesArea.addEventListener('input', updateWordCount);
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 async function loadSettings() {
-  try {
-    settings = await window.api.getSettings();
-  } catch (e) {
-    console.warn('Could not load settings, using defaults.', e);
-  }
+  try { settings = await window.api.getSettings(); }
+  catch (e) { console.warn('Could not load settings:', e); }
   applySettings();
 }
 
 function applySettings() {
   document.body.className = `font-${settings.fontSize || 'large'}`;
+  modeOffline.checked     = !settings.useOnlineMode;
+  modeOnline.checked      =  !!settings.useOnlineMode;
+  apiKeyInput.value       = settings.apiKey || '';
+  toggleAppend.checked    = !!settings.appendMode;
 
-  if (settings.useOnlineMode) {
-    modeOnline.checked  = true;
-    modeOffline.checked = false;
-  } else {
-    modeOffline.checked = true;
-    modeOnline.checked  = false;
-  }
-
-  apiKeyInput.value = settings.apiKey || '';
-  toggleAppend.checked = !!settings.appendMode;
-
-  sizeBtns.forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.size === (settings.fontSize || 'large'));
-  });
+  sizeBtns.forEach((b) => b.classList.toggle('active', b.dataset.size === (settings.fontSize || 'large')));
 
   const currentModel = settings.model || 'Xenova/whisper-tiny.en';
   if (modelSelect) modelSelect.value = currentModel;
-  // Sync radio buttons
-  modelRadios.forEach((r) => { r.checked = (r.value === currentModel); });
+  modelRadios.forEach((r) => { r.checked = r.value === currentModel; });
 }
 
-btnOpenSettings.addEventListener('click', () => {
-  applySettings();
-  settingsPanel.classList.remove('hidden');
-});
-btnCloseSettings.addEventListener('click', () => settingsPanel.classList.add('hidden'));
+btnOpenSettings.addEventListener('click', () => { applySettings(); settingsPanel.classList.remove('hidden'); });
+btnCloseSettings.addEventListener('click',  () => settingsPanel.classList.add('hidden'));
 btnCancelSettings.addEventListener('click', () => settingsPanel.classList.add('hidden'));
 
 btnToggleKey.addEventListener('click', () => {
@@ -192,17 +175,14 @@ btnToggleKey.addEventListener('click', () => {
   btnToggleKey.textContent = isHidden ? '🙈' : '👁';
 });
 
-sizeBtns.forEach((btn) => {
-  btn.addEventListener('click', () => {
-    sizeBtns.forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.body.className = `font-${btn.dataset.size}`;
-  });
-});
+sizeBtns.forEach((btn) => btn.addEventListener('click', () => {
+  sizeBtns.forEach((b) => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.body.className = `font-${btn.dataset.size}`;
+}));
 
 btnSaveSettings.addEventListener('click', async () => {
-  const activeSize  = document.querySelector('.size-btn.active');
-  // Read selected radio (falls back to hidden select)
+  const activeSize   = document.querySelector('.size-btn.active');
   const checkedRadio = document.querySelector('input[name="model-pick"]:checked');
   const chosenModel  = checkedRadio ? checkedRadio.value
                      : (modelSelect ? modelSelect.value : 'Xenova/whisper-tiny.en');
@@ -217,15 +197,12 @@ btnSaveSettings.addEventListener('click', async () => {
   };
 
   if (newSettings.useOnlineMode && !newSettings.apiKey) {
-    showError(
-      'API Key Required',
+    showError('API Key Required',
       'You selected "Better Quality Mode" but didn\'t enter an API key.\n\n' +
-      'Please enter your OpenAI API key, or switch back to Offline Mode.'
-    );
+      'Please enter your OpenAI API key, or switch back to Offline Mode.');
     return;
   }
 
-  // If the model changed, the worker must be reloaded on next use
   const modelChanged = chosenModel !== settings.model;
   await window.api.saveSettings(newSettings);
   settings = newSettings;
@@ -233,125 +210,59 @@ btnSaveSettings.addEventListener('click', async () => {
   settingsPanel.classList.add('hidden');
 
   if (modelChanged) {
-    // Restart the worker with the new model
     setStatus('loading', 'Loading new voice recognition model…');
     appReady = false;
     btnRecord.disabled = true;
-    if (whisperWorker) { whisperWorker.terminate(); whisperWorker = null; }
-    initWhisperWorker().catch(() => {});
+    const userDataPath = await window.api.getUserDataPath();
+    window.api.reloadModel(chosenModel, userDataPath + '/models');
   } else {
     setStatus('ready');
   }
 });
 
-// ─── Compute worker paths (dev vs packaged) ───────────────────────────────────
-// In a packaged Electron app the @xenova files are extracted alongside the asar
-// at  resources/app.asar.unpacked/node_modules/@xenova/…
-// In dev they sit at  node_modules/@xenova/… relative to the project root,
-// which is two levels up from the worker file (src/whisper-worker.js).
+// ─── Model loading via IPC ────────────────────────────────────────────────────
 
-async function computeWorkerPaths() {
-  const { isPackaged, resourcesPath } = await window.api.getAppInfo();
+function initModelListeners() {
+  window.api.onModelProgress((progress) => {
+    let pct = 0;
+    if (typeof progress === 'number') {
+      pct = Math.round(progress * 100);
+    } else if (progress && typeof progress.progress === 'number') {
+      pct = Math.round(progress.progress * 100);
+    }
 
-  let transformersPath;
-  let wasmPath;
+    if (progress && (progress.status === 'download' || progress.status === 'initiate')) {
+      setupOverlay.classList.remove('hidden');
+      setStatus('setup');
+      if (progress.status === 'download') {
+        setupProgressBar.style.width   = `${pct}%`;
+        setupProgressLbl.textContent   = `Downloading voice recognition… ${pct}%`;
+      } else {
+        setupProgressLbl.textContent = 'Preparing offline model…';
+      }
+    } else if (progress && progress.status === 'done') {
+      setupProgressBar.style.width = '100%';
+    }
+  });
 
-  if (isPackaged) {
-    // Windows paths use backslashes — convert to forward-slashes for file:// URLs
-    const base = resourcesPath.replace(/\\/g, '/');
-    const unpacked = `${base}/app.asar.unpacked/node_modules/@xenova/transformers/dist`;
-    transformersPath = `file:///${unpacked}/transformers.min.js`;
-    wasmPath         = `file:///${unpacked}/`;
-  } else {
-    // Dev mode: relative to the worker file (src/whisper-worker.js)
-    transformersPath = '../node_modules/@xenova/transformers/dist/transformers.min.js';
-    wasmPath         = '../node_modules/@xenova/transformers/dist/';
-  }
+  window.api.onModelReady(() => {
+    setupOverlay.classList.add('hidden');
+    appReady = true;
+    btnRecord.disabled = false;
+    setStatus('ready');
+  });
 
-  return { transformersPath, wasmPath };
+  window.api.onModelError((msg) => {
+    setupOverlay.classList.add('hidden');
+    setStatus('error', msg);
+    showError('Voice Recognition Error', msg);
+  });
 }
 
-// ─── Whisper Worker setup ─────────────────────────────────────────────────────
-
-async function initWhisperWorker() {
-  return new Promise(async (resolve, reject) => {
-    whisperWorker = new Worker('./whisper-worker.js');
-
-    const [userDataPath, { transformersPath, wasmPath }] = await Promise.all([
-      window.api.getUserDataPath(),
-      computeWorkerPaths(),
-    ]);
-
-    const modelName = settings.model || 'Xenova/whisper-tiny.en';
-
-    whisperWorker.onmessage = (event) => {
-      const { type, progress, error, text } = event.data;
-
-      switch (type) {
-        case 'loading-progress': {
-          let pct = 0;
-          if (typeof progress === 'number') {
-            pct = Math.round(progress * 100);
-          } else if (progress && typeof progress.progress === 'number') {
-            pct = Math.round(progress.progress * 100);
-          }
-
-          if (progress && (progress.status === 'download' || progress.status === 'initiate')) {
-            setupOverlay.classList.remove('hidden');
-            setStatus('setup');
-            if (progress.status === 'download') {
-              setupProgressBar.style.width   = `${pct}%`;
-              setupProgressLbl.textContent   = `Downloading voice recognition… ${pct}%`;
-            } else {
-              setupProgressLbl.textContent = 'Preparing offline model…';
-            }
-          } else if (progress && progress.status === 'done') {
-            setupProgressBar.style.width = '100%';
-          }
-          break;
-        }
-
-        case 'model-ready':
-          setupOverlay.classList.add('hidden');
-          appReady = true;
-          btnRecord.disabled = false;
-          setStatus('ready');
-          resolve();
-          break;
-
-        case 'result':
-          handleTranscriptionResult(text);
-          break;
-
-        case 'error':
-          setupOverlay.classList.add('hidden');
-          setStatus('error', `Error: ${error}`);
-          showError('Voice Recognition Error', error);
-          setProcessing(false);
-          reject(new Error(error));
-          break;
-      }
-    };
-
-    whisperWorker.onerror = (err) => {
-      setupOverlay.classList.add('hidden');
-      const msg = err.message || 'Worker failed to start';
-      setStatus('error', msg);
-      showError('Setup Failed', msg);
-      reject(err);
-    };
-
-    // Send paths + model name to the worker
-    whisperWorker.postMessage({
-      type: 'load-model',
-      data: {
-        modelName,
-        cacheDir:        userDataPath + '/models',
-        transformersPath,
-        wasmPath,
-      },
-    });
-  });
+async function startModelLoading() {
+  const userDataPath = await window.api.getUserDataPath();
+  const modelName    = settings.model || 'Xenova/whisper-tiny.en';
+  window.api.startModelLoading(modelName, userDataPath + '/models');
 }
 
 // ─── Recording ────────────────────────────────────────────────────────────────
@@ -363,13 +274,10 @@ async function startRecording() {
     audioChunks  = [];
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : 'audio/webm';
+      ? 'audio/webm;codecs=opus' : 'audio/webm';
 
     mediaRecorder = new MediaRecorder(stream, { mimeType });
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) audioChunks.push(e.data);
-    };
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.onstop = () => {
       stream.getTracks().forEach((t) => t.stop());
       processAudio();
@@ -382,11 +290,8 @@ async function startRecording() {
     startTimer();
   } catch (err) {
     let msg = 'Could not access your microphone.';
-    if (err.name === 'NotAllowedError') {
-      msg = 'Microphone access was denied. Please allow microphone access and try again.';
-    } else if (err.name === 'NotFoundError') {
-      msg = 'No microphone was found. Please connect a microphone and try again.';
-    }
+    if (err.name === 'NotAllowedError') msg = 'Microphone access was denied. Please allow microphone access and try again.';
+    if (err.name === 'NotFoundError')   msg = 'No microphone was found. Please connect a microphone and try again.';
     showError('Microphone Problem', msg);
     setStatus('error', msg);
   }
@@ -401,32 +306,27 @@ function stopRecording() {
   setProcessing(true);
 }
 
-function setRecordingUI(recording) {
-  if (recording) {
-    btnRecord.classList.add('is-recording');
+function setRecordingUI(on) {
+  btnRecord.classList.toggle('is-recording', on);
+  soundWave.classList.toggle('hidden', !on);
+  recordTimer.classList.toggle('hidden', !on);
+  if (on) {
     btnRecord.classList.remove('is-processing');
     recordBtnIcon.textContent  = '⏹';
     recordBtnLabel.textContent = 'Click here to stop recording';
-    soundWave.classList.remove('hidden');
-    recordTimer.classList.remove('hidden');
-  } else {
-    btnRecord.classList.remove('is-recording');
-    soundWave.classList.add('hidden');
-    recordTimer.classList.add('hidden');
   }
 }
 
 function setProcessing(on) {
   isProcessing = on;
+  btnRecord.classList.toggle('is-processing', on);
+  btnRecord.disabled = on;
   if (on) {
-    btnRecord.classList.add('is-processing');
-    btnRecord.disabled         = true;
     recordBtnIcon.textContent  = '⏳';
     recordBtnLabel.textContent = 'Converting your speech… please wait';
     setStatus('processing');
   } else {
     btnRecord.classList.remove('is-processing');
-    btnRecord.disabled         = false;
     recordBtnIcon.textContent  = '🎤';
     recordBtnLabel.textContent = 'Click here to start speaking';
     setStatus('ready');
@@ -435,11 +335,8 @@ function setProcessing(on) {
 
 btnRecord.addEventListener('click', () => {
   if (!appReady) return;
-  if (isRecording) {
-    stopRecording();
-  } else if (!isProcessing) {
-    startRecording();
-  }
+  if (isRecording)       stopRecording();
+  else if (!isProcessing) startRecording();
 });
 
 // ─── Timer ───────────────────────────────────────────────────────────────────
@@ -450,18 +347,10 @@ function startTimer() {
   timerInterval = setInterval(() => {
     timerSeconds++;
     updateTimerDisplay();
-    // Auto-stop after 3 minutes to keep memory usage low on 8 GB machines
-    if (timerSeconds >= 180) {
-      stopRecording();
-    }
+    if (timerSeconds >= 180) stopRecording(); // auto-stop at 3 min
   }, 1000);
 }
-
-function stopTimer() {
-  clearInterval(timerInterval);
-  timerInterval = null;
-}
-
+function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
 function updateTimerDisplay() {
   const m = Math.floor(timerSeconds / 60);
   const s = timerSeconds % 60;
@@ -473,7 +362,7 @@ function updateTimerDisplay() {
 async function processAudio() {
   if (audioChunks.length === 0) {
     setProcessing(false);
-    showError('No Audio Recorded', 'Nothing was recorded. Please try again and speak into your microphone.');
+    showError('No Audio Recorded', 'Nothing was recorded. Please try again.');
     return;
   }
 
@@ -489,28 +378,26 @@ async function transcribeOffline() {
     const blob        = new Blob(audioChunks, { type: audioChunks[0].type || 'audio/webm' });
     const arrayBuffer = await blob.arrayBuffer();
 
-    const audioCtx = new AudioContext();
-    const decoded  = await audioCtx.decodeAudioData(arrayBuffer);
+    // Decode and resample to 16 kHz mono (required by Whisper)
+    const audioCtx   = new AudioContext();
+    const decoded    = await audioCtx.decodeAudioData(arrayBuffer);
     await audioCtx.close();
 
-    // Resample to 16 kHz mono — required by Whisper
-    const targetRate   = 16000;
-    const offlineCtx   = new OfflineAudioContext(1, Math.ceil(decoded.duration * targetRate), targetRate);
-    const source       = offlineCtx.createBufferSource();
-    source.buffer      = decoded;
-    source.connect(offlineCtx.destination);
-    source.start(0);
-    const resampled    = await offlineCtx.startRendering();
-    const float32Audio = resampled.getChannelData(0);
+    const targetRate  = 16000;
+    const offlineCtx  = new OfflineAudioContext(1, Math.ceil(decoded.duration * targetRate), targetRate);
+    const src         = offlineCtx.createBufferSource();
+    src.buffer        = decoded;
+    src.connect(offlineCtx.destination);
+    src.start(0);
+    const resampled   = await offlineCtx.startRendering();
+    const float32     = resampled.getChannelData(0);
 
-    // Transfer the buffer (zero-copy) to the worker
-    whisperWorker.postMessage(
-      { type: 'transcribe', data: { audio: float32Audio } },
-      [float32Audio.buffer]
-    );
+    // Send as Buffer (Electron IPC serialises it cleanly)
+    const result = await window.api.transcribe(float32.buffer);
+    handleTranscriptionResult(result);
   } catch (err) {
     console.error('Offline transcription error:', err);
-    showError('Transcription Failed', `Could not process your audio: ${err.message}`);
+    showError('Transcription Failed', err.message || 'Could not process your audio.');
     setProcessing(false);
   }
 }
@@ -534,8 +421,7 @@ async function transcribeOnline() {
       throw new Error(errBody.error?.message || `Server error ${response.status}`);
     }
 
-    const result = await response.json();
-    handleTranscriptionResult(result.text);
+    handleTranscriptionResult((await response.json()).text);
   } catch (err) {
     console.error('Online transcription error:', err);
     setStatus('processing', 'Online failed — switching to offline mode…');
@@ -543,24 +429,20 @@ async function transcribeOnline() {
   }
 }
 
-// ─── Handle transcription result ─────────────────────────────────────────────
+// ─── Handle result ────────────────────────────────────────────────────────────
 
 function handleTranscriptionResult(text) {
   setProcessing(false);
-
-  if (!text || text.trim() === '') {
-    setStatus('ready', 'No speech detected. Please try again and speak clearly.');
+  if (!text || !text.trim()) {
+    setStatus('ready', 'No speech detected. Please try again and speak clearly into your microphone.');
     return;
   }
-
   const cleaned = text.trim();
-
   if (settings.appendMode && notesArea.value.trim()) {
     notesArea.value += '\n\n' + cleaned;
   } else {
     notesArea.value = cleaned;
   }
-
   notesArea.scrollTop = notesArea.scrollHeight;
   updateWordCount();
   setStatus('ready', '✅ Speech converted! You can keep talking or edit the text below.');
@@ -571,68 +453,42 @@ function handleTranscriptionResult(text) {
 btnOpen.addEventListener('click', openFile);
 async function openFile() {
   if (notesArea.value.trim()) {
-    const ok = await showConfirm(
-      'Open a file?',
-      'Opening a file will replace your current notes. Do you want to continue?'
-    );
+    const ok = await showConfirm('Open a file?', 'Opening a file will replace your current notes. Continue?');
     if (!ok) return;
   }
-  const result = await window.api.openFile();
-  if (result.success) {
-    notesArea.value = result.content;
-    updateWordCount();
-    setStatus('ready', `📂 Opened: ${result.filePath}`);
-  } else if (!result.canceled) {
-    showError('Could Not Open File', result.error || 'Unknown error');
-  }
+  const r = await window.api.openFile();
+  if (r.success) { notesArea.value = r.content; updateWordCount(); setStatus('ready', `📂 Opened: ${r.filePath}`); }
+  else if (!r.canceled) showError('Could Not Open File', r.error || 'Unknown error');
 }
 
 btnSave.addEventListener('click', saveFile);
 async function saveFile() {
-  const content = notesArea.value;
-  if (!content.trim()) {
-    showError('Nothing to Save', 'Your notes are empty. Please type or speak something first.');
-    return;
-  }
-  const result = await window.api.saveNote(content);
-  if (result.success) {
-    setStatus('saved', `💾 Saved to: ${result.filePath}`);
-    setTimeout(() => setStatus('ready'), 4000);
-  } else if (!result.canceled) {
-    showError('Could Not Save', result.error || 'Unknown error');
-  }
+  if (!notesArea.value.trim()) { showError('Nothing to Save', 'Your notes are empty.'); return; }
+  const r = await window.api.saveNote(notesArea.value);
+  if (r.success) { setStatus('saved', `💾 Saved to: ${r.filePath}`); setTimeout(() => setStatus('ready'), 4000); }
+  else if (!r.canceled) showError('Could Not Save', r.error || 'Unknown error');
 }
 
 btnCopy.addEventListener('click', () => {
   if (!notesArea.value.trim()) return;
   navigator.clipboard.writeText(notesArea.value)
-    .then(() => {
-      setStatus('saved', '📋 Copied to clipboard!');
-      setTimeout(() => setStatus('ready'), 3000);
-    })
+    .then(() => { setStatus('saved', '📋 Copied to clipboard!'); setTimeout(() => setStatus('ready'), 3000); })
     .catch(() => showError('Could Not Copy', 'Unable to copy to clipboard.'));
 });
 
 btnClear.addEventListener('click', async () => {
   if (!notesArea.value.trim()) return;
-  const ok = await showConfirm(
-    'Clear all notes?',
-    'This will delete everything in the notes area. This cannot be undone.'
-  );
-  if (ok) { notesArea.value = ''; updateWordCount(); setStatus('ready', 'Notes cleared.'); }
+  if (await showConfirm('Clear all notes?', 'This cannot be undone.')) {
+    notesArea.value = ''; updateWordCount(); setStatus('ready', 'Notes cleared.');
+  }
 });
 
-// ─── Help modal ───────────────────────────────────────────────────────────────
+// ─── Help & menus ─────────────────────────────────────────────────────────────
 
 btnCloseHelp.addEventListener('click', () => helpModal.classList.add('hidden'));
 
-// ─── Native menu events ───────────────────────────────────────────────────────
-
-window.api.onMenuNew(() => {
-  showConfirm('Start new notes?', 'This will clear your current notes.').then((ok) => {
-    if (ok) { notesArea.value = ''; updateWordCount(); }
-  });
-});
+window.api.onMenuNew(() => showConfirm('Start new notes?', 'This will clear your current notes.')
+  .then((ok) => { if (ok) { notesArea.value = ''; updateWordCount(); } }));
 window.api.onMenuOpen(() => openFile());
 window.api.onMenuSave(() => saveFile());
 window.api.onMenuHelp(() => helpModal.classList.remove('hidden'));
@@ -641,14 +497,10 @@ window.api.onMenuHelp(() => helpModal.classList.remove('hidden'));
 
 document.addEventListener('keydown', (e) => {
   if (document.activeElement === btnRecord && (e.key === ' ' || e.key === 'Enter')) {
-    e.preventDefault();
-    btnRecord.click();
+    e.preventDefault(); btnRecord.click();
   }
   if (e.key === 'Escape') {
-    settingsPanel.classList.add('hidden');
-    helpModal.classList.add('hidden');
-    errorModal.classList.add('hidden');
-    confirmModal.classList.add('hidden');
+    [settingsPanel, helpModal, errorModal, confirmModal].forEach((el) => el.classList.add('hidden'));
   }
 });
 
@@ -657,27 +509,14 @@ document.addEventListener('keydown', (e) => {
 (async function init() {
   setStatus('loading');
   await loadSettings();
+  initModelListeners();
 
-  // Show help on very first run
   if (!settings._hasRun) {
     helpModal.classList.remove('hidden');
   }
 
-  // Initialise Whisper worker (offline, always — used as fallback even in online mode)
-  try {
-    await initWhisperWorker();
-  } catch (err) {
-    if (settings.useOnlineMode && settings.apiKey) {
-      appReady = true;
-      btnRecord.disabled = false;
-      setStatus('ready', '⚠️ Offline model unavailable — using online mode only.');
-    } else {
-      setStatus(
-        'error',
-        'Could not set up voice recognition. Connect to the internet for the first-time setup, then it works offline forever.'
-      );
-    }
-  }
+  // Start loading the offline Whisper model (runs in main process worker_thread)
+  await startModelLoading();
 
   updateWordCount();
 })();
