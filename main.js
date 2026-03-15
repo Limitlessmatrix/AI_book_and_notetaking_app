@@ -4,7 +4,8 @@ const path = require('path');
 const fs   = require('fs');
 
 let mainWindow;
-let whisperWorker = null; // Node.js worker_thread running @xenova/transformers
+let whisperWorker    = null;  // Node.js worker_thread running @xenova/transformers
+let isTranscribing   = false; // prevents concurrent transcription requests
 
 // ─── Window creation ──────────────────────────────────────────────────────────
 
@@ -111,8 +112,13 @@ function startWhisperWorker(modelName, cacheDir) {
       case 'transcribing':
         sendToRenderer('transcribing');
         break;
-      // 'result' and 'error' during transcription are handled by the
-      // per-request handler registered in ipcMain.handle('transcribe')
+      case 'error':
+        // Errors during model loading — propagate to renderer.
+        // (Errors during transcription are caught by the per-request handler below.)
+        if (!isTranscribing) {
+          sendToRenderer('model-error', msg.error || 'An unknown error occurred.');
+        }
+        break;
       default:
         break;
     }
@@ -209,59 +215,69 @@ ipcMain.on('reload-model', (_e, { modelName, cacheDir }) => {
   startWhisperWorker(modelName, cacheDir);
 });
 
-// Blocking transcription call — resolves with text when done
+// Blocking transcription call — resolves with text when done.
+// Only one transcription can run at a time (Whisper is sequential).
 ipcMain.handle('transcribe', async (_e, audioData) => {
-  if (!whisperWorker) throw new Error('Voice recognition is not ready yet.');
+  if (!whisperWorker)  throw new Error('Voice recognition is not ready yet.');
+  if (isTranscribing)  throw new Error('Already transcribing — please wait for the current one to finish.');
 
-  return new Promise((resolve, reject) => {
-    // 3-minute timeout (max recording length)
-    const timeout = setTimeout(() => {
-      whisperWorker.off('message', handler);
-      reject(new Error('Transcription took too long. Please try a shorter recording.'));
-    }, 180_000);
+  isTranscribing = true;
 
-    function handler(msg) {
-      if (msg.type === 'result') {
-        clearTimeout(timeout);
+  try {
+    return await new Promise((resolve, reject) => {
+      // 3-minute timeout (matches the max recording length)
+      const timeout = setTimeout(() => {
         whisperWorker.off('message', handler);
-        resolve(msg.text);
-      } else if (msg.type === 'error') {
-        clearTimeout(timeout);
-        whisperWorker.off('message', handler);
-        reject(new Error(msg.error));
+        isTranscribing = false;
+        reject(new Error('Transcription took too long. Please try a shorter recording.'));
+      }, 180_000);
+
+      function handler(msg) {
+        if (msg.type === 'result') {
+          clearTimeout(timeout);
+          whisperWorker.off('message', handler);
+          isTranscribing = false;
+          resolve(msg.text);
+        } else if (msg.type === 'error') {
+          clearTimeout(timeout);
+          whisperWorker.off('message', handler);
+          isTranscribing = false;
+          reject(new Error(msg.error));
+        }
+        // 'transcribing' is a status update — keep the listener active
       }
-      // 'transcribing' is a status update, not final — keep listening
-    }
 
-    whisperWorker.on('message', handler);
+      whisperWorker.on('message', handler);
 
-    // audioData from Electron IPC arrives as a Buffer (Node.js Buffer wraps
-    // an ArrayBuffer slice). Reconstruct Float32Array then copy the underlying
-    // ArrayBuffer so we can safely transfer it to the worker thread
-    // (transferring avoids a full copy inside the worker).
-    let srcFloat32;
-    if (Buffer.isBuffer(audioData)) {
-      srcFloat32 = new Float32Array(
-        audioData.buffer,
-        audioData.byteOffset,
-        audioData.byteLength / 4
+      // audioData from Electron IPC arrives as a Buffer (Node.js Buffer wraps
+      // a slice of an ArrayBuffer pool). Reconstruct Float32Array then copy
+      // the underlying bytes into an independent ArrayBuffer for transfer.
+      let srcFloat32;
+      if (Buffer.isBuffer(audioData)) {
+        srcFloat32 = new Float32Array(
+          audioData.buffer,
+          audioData.byteOffset,
+          audioData.byteLength / 4
+        );
+      } else {
+        srcFloat32 = new Float32Array(audioData);
+      }
+
+      // .slice() produces an independent ArrayBuffer — safe to transfer zero-copy
+      const transferBuf = srcFloat32.buffer.slice(
+        srcFloat32.byteOffset,
+        srcFloat32.byteOffset + srcFloat32.byteLength
       );
-    } else {
-      srcFloat32 = new Float32Array(audioData);
-    }
 
-    // .slice(0) gives us an independent ArrayBuffer we own; safe to transfer.
-    const transferBuf = srcFloat32.buffer.slice(
-      srcFloat32.byteOffset,
-      srcFloat32.byteOffset + srcFloat32.byteLength
-    );
-
-    // postMessage with transfer list — zero-copy handoff to the worker
-    whisperWorker.postMessage(
-      { type: 'transcribe', audio: transferBuf },
-      [transferBuf]
-    );
-  });
+      whisperWorker.postMessage(
+        { type: 'transcribe', audio: transferBuf },
+        [transferBuf]
+      );
+    });
+  } catch (err) {
+    isTranscribing = false; // ensure flag is always cleared on any throw
+    throw err;
+  }
 });
 
 ipcMain.handle('save-note', async (_e, { content, suggestedName }) => {

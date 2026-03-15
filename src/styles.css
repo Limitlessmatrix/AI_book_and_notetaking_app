@@ -159,6 +159,18 @@ body {
   border-radius: 999px;
   transition: width 0.4s ease;
 }
+/* Indeterminate shimmer — used during ONNX engine init (after download, before model-ready) */
+.progress-fill.indeterminate {
+  width: 100% !important;
+  background-size: 200% 100%;
+  background-image: linear-gradient(90deg, #60a5fa 0%, var(--clr-primary) 40%, #60a5fa 60%, #bfdbfe 100%);
+  animation: shimmer 1.6s linear infinite;
+  transition: none;
+}
+@keyframes shimmer {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
+}
 
 .progress-label { font-size: 1em; color: var(--clr-text-muted); margin-bottom: 18px; }
 .overlay-hint   { font-size: 0.95em; color: var(--clr-text-muted); }
