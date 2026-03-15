@@ -356,7 +356,8 @@ async function startModelLoading() {
 // ─── Recording ────────────────────────────────────────────────────────────────
 
 async function startRecording() {
-  if (!appReady || isProcessing) return;
+  if (!appReady || isProcessing || isRecording) return;
+  isRecording = true;  // set early to block any concurrent call while awaiting getUserMedia
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     audioChunks  = [];
@@ -375,11 +376,11 @@ async function startRecording() {
     };
 
     mediaRecorder.start(250);
-    isRecording = true;
     setRecordingUI(true);
     setStatus('recording');
     startTimer();
   } catch (err) {
+    isRecording = false;  // reset on failure so user can try again
     let msg = 'Could not access your microphone.';
     if (err.name === 'NotAllowedError') msg = 'Microphone access was denied. Please allow microphone access and try again.';
     if (err.name === 'NotFoundError')   msg = 'No microphone was found. Please connect a microphone and try again.';
@@ -468,6 +469,7 @@ function startLevelMeter(stream) {
     const dataArr = new Uint8Array(bufLen);
 
     function tick() {
+      if (!analyserNode) return;
       levelRafId = requestAnimationFrame(tick);
       analyserNode.getByteFrequencyData(dataArr);
 
@@ -530,10 +532,11 @@ async function transcribeOffline() {
     const blob        = new Blob(audioChunks, { type: audioChunks[0].type || 'audio/webm' });
     const arrayBuffer = await blob.arrayBuffer();
 
-    // Decode and resample to 16 kHz mono (required by Whisper)
-    const audioCtx   = new AudioContext();
-    const decoded    = await audioCtx.decodeAudioData(arrayBuffer);
-    await audioCtx.close();
+    // Decode the compressed audio using an OfflineAudioContext (avoids opening a
+    // hardware audio device and conflicting with the level meter's AudioContext
+    // which may still be closing on Windows).
+    const decodeCtx  = new OfflineAudioContext(1, 1, 44100);
+    const decoded    = await decodeCtx.decodeAudioData(arrayBuffer);
 
     const targetRate  = 16000;
     const offlineCtx  = new OfflineAudioContext(1, Math.round(decoded.duration * targetRate), targetRate);
