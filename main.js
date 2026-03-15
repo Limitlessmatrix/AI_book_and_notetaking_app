@@ -88,7 +88,16 @@ function startWhisperWorker(modelName, cacheDir) {
     return;
   }
 
-  const workerPath = path.join(__dirname, 'src', 'node-whisper-worker.js');
+  // .mjs forces Node.js to treat the file as a native ES Module,
+  // which is required because @xenova/transformers is ESM-only.
+  //
+  // When packaged with electron-builder (asar), worker_threads cannot load
+  // files from inside the archive. The asarUnpack rule in package.json puts
+  // the .mjs file in the app.asar.unpacked directory, and we redirect there.
+  let workerPath = path.join(__dirname, 'src', 'node-whisper-worker.mjs');
+  if (app.isPackaged) {
+    workerPath = workerPath.replace('app.asar', 'app.asar.unpacked');
+  }
   whisperWorker = new WorkerThread(workerPath);
 
   whisperWorker.on('message', (msg) => {
@@ -226,20 +235,32 @@ ipcMain.handle('transcribe', async (_e, audioData) => {
 
     whisperWorker.on('message', handler);
 
-    // audioData from IPC is a Buffer; rebuild Float32Array
-    let float32;
+    // audioData from Electron IPC arrives as a Buffer (Node.js Buffer wraps
+    // an ArrayBuffer slice). Reconstruct Float32Array then copy the underlying
+    // ArrayBuffer so we can safely transfer it to the worker thread
+    // (transferring avoids a full copy inside the worker).
+    let srcFloat32;
     if (Buffer.isBuffer(audioData)) {
-      float32 = new Float32Array(
+      srcFloat32 = new Float32Array(
         audioData.buffer,
         audioData.byteOffset,
         audioData.byteLength / 4
       );
     } else {
-      // ArrayBuffer path
-      float32 = new Float32Array(audioData);
+      srcFloat32 = new Float32Array(audioData);
     }
 
-    whisperWorker.postMessage({ type: 'transcribe', audio: float32 });
+    // .slice(0) gives us an independent ArrayBuffer we own; safe to transfer.
+    const transferBuf = srcFloat32.buffer.slice(
+      srcFloat32.byteOffset,
+      srcFloat32.byteOffset + srcFloat32.byteLength
+    );
+
+    // postMessage with transfer list — zero-copy handoff to the worker
+    whisperWorker.postMessage(
+      { type: 'transcribe', audio: transferBuf },
+      [transferBuf]
+    );
   });
 });
 
