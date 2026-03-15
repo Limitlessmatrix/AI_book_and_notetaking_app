@@ -33,7 +33,11 @@ async function loadModel(modelName, cacheDir) {
     parentPort.postMessage({ type: 'model-ready' });
     return;
   }
-  if (isLoading) return;
+  if (isLoading) {
+    // A load is already in progress — notify caller so it isn't left waiting silently
+    parentPort.postMessage({ type: 'error', error: 'Model is already loading. Please wait.' });
+    return;
+  }
   isLoading = true;
 
   try {

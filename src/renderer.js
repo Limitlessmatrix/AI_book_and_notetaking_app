@@ -223,6 +223,29 @@ btnSaveSettings.addEventListener('click', async () => {
 // ─── Model loading via IPC ────────────────────────────────────────────────────
 
 function initModelListeners() {
+  // Tracks whether every file reported 'done' — used to switch to ONNX-init phase
+  let allFilesDownloaded = false;
+  // Safety timeout: if model-ready doesn't fire within 5 min, show an error
+  let modelReadyTimeout  = null;
+
+  function clearModelTimeout() {
+    if (modelReadyTimeout) { clearTimeout(modelReadyTimeout); modelReadyTimeout = null; }
+  }
+
+  function startModelTimeout() {
+    clearModelTimeout();
+    modelReadyTimeout = setTimeout(() => {
+      setupProgressBar.classList.remove('indeterminate');
+      setupOverlay.classList.add('hidden');
+      setStatus('error', 'Voice recognition took too long to start. Please restart the app.');
+      showError(
+        'Loading Timed Out',
+        'The voice recognition engine took too long to start.\n\n' +
+        'Try closing other programs to free up memory, then restart Voice Notes.'
+      );
+    }, 5 * 60 * 1000); // 5 minutes
+  }
+
   window.api.onModelProgress((progress) => {
     if (!progress) return;
 
@@ -235,10 +258,13 @@ function initModelListeners() {
       : 0;
 
     if (status === 'initiate') {
-      // A new file is about to start downloading
+      // A new file is about to start — reset bar for this file
+      allFilesDownloaded = false;
+      setupProgressBar.classList.remove('indeterminate');
       setupOverlay.classList.remove('hidden');
       setStatus('setup', 'Downloading voice model for the first time…');
-      setupProgressLbl.textContent = 'Starting download…';
+      setupProgressBar.style.width = '0%';
+      setupProgressLbl.textContent = `Starting download of ${progress.file || 'model'}…`;
 
     } else if (status === 'progress') {
       // Active download — update bar and label
@@ -248,18 +274,34 @@ function initModelListeners() {
       setupProgressLbl.textContent = `Downloading voice recognition… ${pct}%`;
 
     } else if (status === 'done') {
-      // One file finished; keep bar visible until model-ready fires
+      // A file finished — show 100% briefly, then switch to engine-init phase
       setupProgressBar.style.width = '100%';
-      setupProgressLbl.textContent = 'Download complete! Starting up…';
+      setupProgressLbl.textContent = 'File downloaded. Loading voice engine…';
+      allFilesDownloaded = true;
+
+      // After a short pause switch to the indeterminate "engine initialising" animation.
+      // The ONNX runtime compiles the model in memory — this takes 30–90 s with no callbacks.
+      setTimeout(() => {
+        if (!appReady) {
+          setupProgressBar.classList.add('indeterminate');
+          setupProgressLbl.textContent =
+            'Loading voice engine into memory… (this can take up to a minute)';
+          startModelTimeout();
+        }
+      }, 600);
 
     } else if (status === 'ready') {
-      // pipeline() is fully ready (may fire before our IPC model-ready event)
+      // pipeline() fully resolved — model-ready IPC event will follow immediately
+      clearModelTimeout();
+      setupProgressBar.classList.remove('indeterminate');
       setupProgressBar.style.width = '100%';
       setupProgressLbl.textContent = 'Voice recognition ready!';
     }
   });
 
   window.api.onModelReady(() => {
+    clearModelTimeout();
+    setupProgressBar.classList.remove('indeterminate');
     setupOverlay.classList.add('hidden');
     appReady = true;
     btnRecord.disabled = false;
@@ -267,6 +309,8 @@ function initModelListeners() {
   });
 
   window.api.onModelError((msg) => {
+    clearModelTimeout();
+    setupProgressBar.classList.remove('indeterminate');
     setupOverlay.classList.add('hidden');
     setStatus('error', msg);
     showError('Voice Recognition Error', msg);
@@ -398,7 +442,7 @@ async function transcribeOffline() {
     await audioCtx.close();
 
     const targetRate  = 16000;
-    const offlineCtx  = new OfflineAudioContext(1, Math.ceil(decoded.duration * targetRate), targetRate);
+    const offlineCtx  = new OfflineAudioContext(1, Math.round(decoded.duration * targetRate), targetRate);
     const src         = offlineCtx.createBufferSource();
     src.buffer        = decoded;
     src.connect(offlineCtx.destination);
