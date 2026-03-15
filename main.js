@@ -4,8 +4,9 @@ const path = require('path');
 const fs   = require('fs');
 
 let mainWindow;
-let whisperWorker    = null;  // Node.js worker_thread running @xenova/transformers
-let isTranscribing   = false; // prevents concurrent transcription requests
+let whisperWorker             = null;  // Node.js worker_thread running @xenova/transformers
+let isTranscribing            = false; // prevents concurrent transcription requests
+let pendingTranscribeReject   = null;  // reject fn for the in-flight transcription promise
 
 // ─── Window creation ──────────────────────────────────────────────────────────
 
@@ -125,15 +126,29 @@ function startWhisperWorker(modelName, cacheDir) {
   });
 
   whisperWorker.on('error', (err) => {
+    // If transcription is in flight, unblock the waiting renderer immediately
+    if (pendingTranscribeReject) {
+      const rej = pendingTranscribeReject;
+      pendingTranscribeReject = null;
+      isTranscribing = false;
+      rej(new Error('Voice recognition crashed: ' + (err.message || 'unknown error')));
+    }
     sendToRenderer('model-error', err.message || 'Worker thread crashed');
     whisperWorker = null;
   });
 
   whisperWorker.on('exit', (code) => {
+    // Unblock any in-flight transcription
+    if (pendingTranscribeReject) {
+      const rej = pendingTranscribeReject;
+      pendingTranscribeReject = null;
+      isTranscribing = false;
+      rej(new Error('Voice recognition stopped unexpectedly. Please restart the app.'));
+    }
     if (code !== 0) {
       sendToRenderer('model-error', `Worker exited unexpectedly (code ${code})`);
-      whisperWorker = null;
     }
+    whisperWorker = null;
   });
 
   whisperWorker.postMessage({ type: 'load-model', modelName, cacheDir });
@@ -225,20 +240,25 @@ ipcMain.handle('transcribe', async (_e, audioData) => {
 
   try {
     return await new Promise((resolve, reject) => {
-      // 3-minute timeout (matches the max recording length)
+      pendingTranscribeReject = reject; // allow worker crash handlers to unblock us
+
+      // 60-second timeout — Whisper tiny should never need more than this
       const timeout = setTimeout(() => {
-        whisperWorker.off('message', handler);
+        pendingTranscribeReject = null;
+        whisperWorker && whisperWorker.off('message', handler);
         isTranscribing = false;
-        reject(new Error('Transcription took too long. Please try a shorter recording.'));
-      }, 180_000);
+        reject(new Error('Transcription timed out after 60 seconds. Please try a shorter recording.'));
+      }, 60_000);
 
       function handler(msg) {
         if (msg.type === 'result') {
+          pendingTranscribeReject = null;
           clearTimeout(timeout);
           whisperWorker.off('message', handler);
           isTranscribing = false;
           resolve(msg.text);
         } else if (msg.type === 'error') {
+          pendingTranscribeReject = null;
           clearTimeout(timeout);
           whisperWorker.off('message', handler);
           isTranscribing = false;
@@ -275,6 +295,7 @@ ipcMain.handle('transcribe', async (_e, audioData) => {
       );
     });
   } catch (err) {
+    pendingTranscribeReject = null;
     isTranscribing = false; // ensure flag is always cleared on any throw
     throw err;
   }

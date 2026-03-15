@@ -87,9 +87,10 @@ let timerInterval  = null;
 let timerSeconds   = 0;
 
 // Mic level meter state
-let analyserNode   = null;
-let levelRafId     = null;
-const waveBars     = document.querySelectorAll('.wave-bar');
+let analyserNode          = null;
+let levelRafId            = null;
+let levelCtxClosePromise  = Promise.resolve(); // tracks when level AudioContext fully closes
+const waveBars            = document.querySelectorAll('.wave-bar');
 
 // ─── Status helpers ───────────────────────────────────────────────────────────
 
@@ -372,7 +373,11 @@ async function startRecording() {
     mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
     mediaRecorder.onstop = () => {
       stream.getTracks().forEach((t) => t.stop());
-      processAudio();
+      processAudio().catch((err) => {
+        console.error('[onstop] processAudio threw:', err);
+        setProcessing(false);
+        showError('Recording Error', err.message || 'Something went wrong processing your audio.');
+      });
     };
 
     mediaRecorder.start(250);
@@ -499,8 +504,9 @@ function startLevelMeter(stream) {
 function stopLevelMeter() {
   if (levelRafId) { cancelAnimationFrame(levelRafId); levelRafId = null; }
   if (analyserNode) {
-    try { analyserNode.context.close(); } catch (_) {}
-    analyserNode = null;
+    const ctx = analyserNode.context;
+    analyserNode = null;  // null BEFORE close so any stray tick() call exits cleanly
+    levelCtxClosePromise = ctx.close().catch(() => {});
   }
   // Reset bars to idle height so they don't freeze mid-animation
   waveBars.forEach((bar) => bar.style.removeProperty('--bar-height'));
@@ -532,12 +538,17 @@ async function transcribeOffline() {
     const blob        = new Blob(audioChunks, { type: audioChunks[0].type || 'audio/webm' });
     const arrayBuffer = await blob.arrayBuffer();
 
-    // Decode the compressed audio using an OfflineAudioContext (avoids opening a
-    // hardware audio device and conflicting with the level meter's AudioContext
-    // which may still be closing on Windows).
-    const decodeCtx  = new OfflineAudioContext(1, 1, 44100);
-    const decoded    = await decodeCtx.decodeAudioData(arrayBuffer);
+    // Wait for the level-meter AudioContext to fully release the hardware audio
+    // device before opening a new one for decode (required on Windows — only
+    // one AudioContext can hold the device at a time).
+    await levelCtxClosePromise;
 
+    // Decode the compressed webm/opus blob into a raw PCM AudioBuffer.
+    const audioCtx   = new AudioContext();
+    const decoded    = await audioCtx.decodeAudioData(arrayBuffer);
+    await audioCtx.close();
+
+    // Resample to 16 kHz mono — required by Whisper.
     const targetRate  = 16000;
     const offlineCtx  = new OfflineAudioContext(1, Math.round(decoded.duration * targetRate), targetRate);
     const src         = offlineCtx.createBufferSource();
@@ -545,9 +556,12 @@ async function transcribeOffline() {
     src.connect(offlineCtx.destination);
     src.start(0);
     const resampled   = await offlineCtx.startRendering();
-    const float32     = resampled.getChannelData(0);
 
-    // Send as Buffer (Electron IPC serialises it cleanly)
+    // getChannelData() returns a view into the AudioBuffer's internal memory.
+    // Explicitly copy into a fresh Float32Array so the IPC transfer gets a
+    // clean, standalone ArrayBuffer (not a view of a larger shared pool).
+    const float32 = new Float32Array(resampled.getChannelData(0));
+
     const result = await window.api.transcribe(float32.buffer);
     handleTranscriptionResult(result);
   } catch (err) {
